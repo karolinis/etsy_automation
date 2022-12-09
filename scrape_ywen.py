@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import pandas as pd
 from selenium import webdriver
@@ -18,13 +19,34 @@ def gspread_access():
     gs = gc.open('Order tracking')
     return gs
 
-def error_handling(number):
+def error_handling(number, flag):
     # Used to split the number in the comprehension
-    try:
-        number = number.split('\n')[1]
-    except:
-        pass
-    return number
+    if flag == 0: #tracking number
+        try:
+            number = number.split('\n')[1]
+        except:
+            pass
+        return number
+    elif flag == 1: #days in transport string
+        try:
+            number = number.split('\n')[2]
+        except:
+            number = '' #the empty string is used to fill the dataframe as we need to have the same number of rows
+        return number
+    elif flag == 2: #days in transport
+        try:
+            regex = re.compile(r'\d+')
+            number = regex.search(number).group(0)
+        except:
+            pass
+        return number
+    elif flag == 3: #find company
+        try:
+            regex = re.compile(r'Last mile=> (.*?), number')
+            number = regex.search(number).group(1)
+        except:
+            number = ''
+        return number
 
 def split_string(string):
     # Used to split the string in the comprehension
@@ -63,10 +85,11 @@ def click_button():
     # try to find and click the element, retrying if necessary
     for i in range(MAX_RETRIES):
         try:
-            wait = WebDriverWait(driver, 2).until(
+            wait = WebDriverWait(driver, 5).until(
                 EC.element_to_be_clickable((By.XPATH, "//a/img[@src='/static/img/queren.png']")))
             driver.find_element_by_xpath("//a/img[@src='/static/img/queren.png']").click()
-            time.sleep(1)
+            wait = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//div[@class='cx_xx']")))
             break  # exit the loop if the operation succeeds
         except Exception:
             if i == MAX_RETRIES - 1:  # reached the maximum number of retries
@@ -95,44 +118,17 @@ def scrape_data_table(driver):
     # Use XPath to find the delivery status
     delivery_status = driver.find_elements_by_xpath('//div[@class="cx_xx"]')
     delivery_status = [status.text for status in delivery_status]
+    company = [error_handling(number, 3) for number in delivery_status]
 
     order_nr = driver.find_elements_by_xpath("//div[@class ='cx_bt_xx']")
     order_nr = [number.text for number in order_nr]
-    tracking_nr = [error_handling(number) for number in order_nr] #need to add error handling as not every value has the possibility to be splitted
+    tracking_nr = [error_handling(number, 0) for number in order_nr] #need to add error handling as not every value has the possibility to be splitted
+    days_in_transport = [error_handling(number, 1) for number in order_nr] #need to add error handling as not every value has the possibility to be splitted
+    days_in_transport = [error_handling(number, 2) for number in days_in_transport]
     order_nr = [number.split('\n')[0] for number in order_nr]
 
-    #we need to find
-    html = driver.page_source
-    soup = BeautifulSoup(html, 'lxml')
 
-    div_elements = soup.find_all('div', {'class': 'cx_lb'})
-
-    order_processed = []
-
-    # Loop through the div elements and find the last li element inside the ul element
-    for div in div_elements:
-        ul_element = div.find('ul')
-        if ul_element:
-            # Get all li elements inside the ul element
-            li_elements = ul_element.find_all('li')
-            # If there are any li elements, find the div with a class of cz_r inside the last li element
-            if li_elements:
-                last_li = li_elements[-1]
-                cz_r = last_li.find('div', {'class': 'cz_r'})
-                if cz_r is None: #this means that the order doesn't have a status yet
-                    order_processed.append('')
-                # If the div with a class of cz_r exists, find the p element inside it
-                if cz_r:
-                    p = cz_r.find('p')
-                    # If the p element exists, append its text to the list
-                    if p:
-                        order_processed.append(p.text)
-
-    # Split order processed values and keep the date value, use days_since function to get the amount of days
-    # the package is in transit
-    days_in_transport = [days_since(split_string(value)) for value in order_processed]
-
-    return delivery_status, order_nr, tracking_nr, days_in_transport
+    return delivery_status, order_nr, tracking_nr, days_in_transport, company
 
 def loop_through_series(df):
 
@@ -160,9 +156,9 @@ def loop_through_series(df):
     # wait for the presence of the target element
     wait = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, '//div[@class="cx_xx"]')))
 
-    delivery_status, order_nr, tracking_nr, days_in_transport = scrape_data_table(driver)
+    delivery_status, order_nr, tracking_nr, days_in_transport, company = scrape_data_table(driver)
 
-    return delivery_status, order_nr, tracking_nr, days_in_transport
+    return delivery_status, order_nr, tracking_nr, days_in_transport, company
 
 def remove_empty_string(list):
     while("" in list):
@@ -176,21 +172,26 @@ def loop_through_slices(slices):
     delivery_statuses = {}
     tracking_nrs = {}
     days = {}
+    companies = {}
     # Initiate scraping
     for slice in slices:
         main_df = pd.concat([main_df, slice], axis=0)
 
-        delivery_status, order_nr, tracking_nr, days_in_transport = loop_through_series(slice)
+        delivery_status, order_nr, tracking_nr, days_in_transport, company = loop_through_series(slice)
+        print(len(order_nr))
         order_nr = [x for x in order_nr if len(x) > 0]  # removes all empty strings
+        print(len(order_nr))
 
         delivery_statuses.update(dict(zip(order_nr, remove_empty_string(delivery_status))))
         tracking_nrs.update(dict(zip(order_nr, remove_empty_string(tracking_nr))))
         days.update(dict(zip(order_nr, days_in_transport)))
+        companies.update(dict(zip(order_nr, company)))
 
     # Loop through the main dataframe and add the delivery status where key matches tracking
     main_df['delivery_status'] = main_df['tracking'].map(delivery_statuses)
     main_df['tracking_number'] = main_df['tracking'].map(tracking_nrs)
     main_df['days_in_transport'] = main_df['tracking'].map(days)
+    main_df['delivery company'] = main_df['tracking'].map(companies)
 
 
     return main_df
@@ -224,7 +225,7 @@ def push_to_sheets(df, sheet_name, worksheet_name):
     concat_df = pd.concat([existing_df, df], ignore_index=True)
 
     # Remove duplicates from the concatenated dataframe
-    deduped_df = concat_df.drop_duplicates()
+    deduped_df = concat_df.drop_duplicates(keep='last')
 
     # Update the worksheet with the deduped dataframe
     set_with_dataframe(worksheet, deduped_df)
@@ -258,7 +259,7 @@ if __name__ == '__main__':
     options.add_experimental_option('excludeSwitches', ['enable-logging'])
 
     # Create a new instance of the Chrome driver
-    driver = webdriver.Chrome(options=options)
+    driver = webdriver.Chrome()
 
     # Open the specified website
     driver.get('https://track.yw56.com.cn/cn/querydel')
@@ -276,9 +277,10 @@ if __name__ == '__main__':
     main_df['File'] = xlsx_files[user_choice]
 
     # Rearrange the columns
-    cols = main_df.columns.tolist()
-    cols = cols[-1:] + cols[:-1]
-    main_df = main_df[cols]
+    column_order = ["File", "order number", "delivery company", "tracking_number", "tracking", "delivery_status",
+                    "days_in_transport"]
+    # reorder the columns of the DataFrame
+    main_df = main_df.reindex(columns=column_order)
 
     backlog_df = main_df[main_df['delivery_status'] == '没有查到物流信息']
     backlog2 = main_df[main_df['delivery_status'].isnull()]
@@ -293,12 +295,4 @@ if __name__ == '__main__':
     # Close the browser
     driver.close()
 
-    if sys.exitcode == 0:
-        # If the exit code is 0, the pyinstaller command was successful
-        # Use the exit() function to shut down the program
-        exit()
-    else:
-        # If the exit code is not 0, the pyinstaller command failed
-        # Print an error message and exit the program
-        print("Error: pyinstaller command failed")
-        exit(1)
+    print('Done!')
