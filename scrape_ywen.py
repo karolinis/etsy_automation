@@ -26,7 +26,7 @@ def error_handling(number, flag):
             number = number.split('\n')[1]
         except:
             pass
-        return number
+        return str(number) + 'A'
     elif flag == 1: #days in transport string
         try:
             number = number.split('\n')[2]
@@ -38,7 +38,7 @@ def error_handling(number, flag):
             regex = re.compile(r'\d+')
             number = regex.search(number).group(0)
         except:
-            pass
+            number = ''
         return number
     elif flag == 3: #find company
         try:
@@ -78,7 +78,7 @@ def prepare_dataframe(file):
 
     return df_no_duplicates
 
-def click_button():
+def click_button(driver):
     # Time to click the search button, the website often crashes here
     MAX_RETRIES = 10  # maximum number of retries
 
@@ -125,12 +125,12 @@ def scrape_data_table(driver):
     tracking_nr = [error_handling(number, 0) for number in order_nr] #need to add error handling as not every value has the possibility to be splitted
     days_in_transport = [error_handling(number, 1) for number in order_nr] #need to add error handling as not every value has the possibility to be splitted
     days_in_transport = [error_handling(number, 2) for number in days_in_transport]
-    order_nr = [number.split('\n')[0] for number in order_nr]
 
+    order_nr = [number.split('\n')[0] for number in order_nr]
 
     return delivery_status, order_nr, tracking_nr, days_in_transport, company
 
-def loop_through_series(df):
+def loop_through_series(df, driver):
 
     # wait for the placeholder element to load
     wait = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, '(//input)[1]')))
@@ -148,10 +148,10 @@ def loop_through_series(df):
     for tracking_nr in df['tracking']:
         input_placeholder.send_keys(str(tracking_nr) + ' ')
 
-    click_button()
+    click_button(driver)
 
     if driver.find_elements_by_xpath("//span[contains(.,'请求超时，请重试')]"):
-        click_button()
+        click_button(driver)
 
     # wait for the presence of the target element
     wait = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, '//div[@class="cx_xx"]')))
@@ -165,7 +165,7 @@ def remove_empty_string(list):
         list.remove("")
     return list
 
-def loop_through_slices(slices):
+def loop_through_slices(slices, driver):
     # Create main dataframe
     main_df = pd.DataFrame()
 
@@ -177,10 +177,8 @@ def loop_through_slices(slices):
     for slice in slices:
         main_df = pd.concat([main_df, slice], axis=0)
 
-        delivery_status, order_nr, tracking_nr, days_in_transport, company = loop_through_series(slice)
-        print(len(order_nr))
+        delivery_status, order_nr, tracking_nr, days_in_transport, company = loop_through_series(slice, driver)
         order_nr = [x for x in order_nr if len(x) > 0]  # removes all empty strings
-        print(len(order_nr))
 
         delivery_statuses.update(dict(zip(order_nr, remove_empty_string(delivery_status))))
         tracking_nrs.update(dict(zip(order_nr, remove_empty_string(tracking_nr))))
@@ -192,7 +190,6 @@ def loop_through_slices(slices):
     main_df['tracking_number'] = main_df['tracking'].map(tracking_nrs)
     main_df['days_in_transport'] = main_df['tracking'].map(days)
     main_df['delivery company'] = main_df['tracking'].map(companies)
-
 
     return main_df
 
@@ -221,34 +218,22 @@ def push_to_sheets(df, sheet_name, worksheet_name):
     # Get the current data from the worksheet as a dataframe
     existing_df = pd.DataFrame(worksheet.get_all_records())
 
-    # Concatenate the input dataframe with the existing data
-    concat_df = pd.concat([existing_df, df], ignore_index=True)
+    concat_df = pd.concat([df, existing_df], axis=0, join='outer')
 
     # Remove duplicates from the concatenated dataframe
-    deduped_df = concat_df.drop_duplicates(keep='last')
+    concat_df = concat_df.drop_duplicates(subset=['tracking'])
 
     # Update the worksheet with the deduped dataframe
-    set_with_dataframe(worksheet, deduped_df)
+    set_with_dataframe(worksheet, concat_df)
 
-
-if __name__ == '__main__':
-    # Get the current folder
-    current_folder = os.getcwd()
-
-    # Get the list of XLSX files in the current folder
-    xlsx_files = [f for f in os.listdir(current_folder) if f.endswith('.xlsx')]
-
-    # Ask the user which XLSX file to use for scraping
-    print('Which XLSX file do you want to use for scraping?')
-
-    [print(x) for x in enumerate(xlsx_files)]
-
-    user_choice = int(input('Enter the number of the file: '))
-
+def main(filename, flag):
     # Feedback to the user
-    print('Running file: ', xlsx_files[user_choice])
+    print('Running file: ', filename)
 
-    df = prepare_dataframe(xlsx_files[user_choice])
+    if flag == 0:
+        df = prepare_dataframe(filename)
+    else:
+        df = filename
 
     # Slice the dataframe into slices of 30 rows each
     slices = slice_dataframe(df)
@@ -259,29 +244,29 @@ if __name__ == '__main__':
     options.add_experimental_option('excludeSwitches', ['enable-logging'])
 
     # Create a new instance of the Chrome driver
-    driver = webdriver.Chrome()
+    driver = webdriver.Chrome(options=options)
 
     # Open the specified website
     driver.get('https://track.yw56.com.cn/cn/querydel')
 
-    main_df = loop_through_slices(slices)
+    main_df = loop_through_slices(slices, driver)
 
-    # Pandas options
-    pd.set_option('display.max_columns', None)
-    pd.set_option('display.max_rows', None)
-    pd.set_option('display.width', None)
-
-    # Separate the records that are going into backlog
-    # Main df to excel
-    main_df.to_excel(f'{xlsx_files[user_choice]}_updated.xlsx', index=False)
-    main_df['File'] = xlsx_files[user_choice]
+    if flag == 0:
+        main_df['File'] = filename
 
     # Rearrange the columns
     column_order = ["File", "order number", "delivery company", "tracking_number", "tracking", "delivery_status",
                     "days_in_transport"]
+
+    try:
+        main_df["order number"] = main_df["order number"].apply(lambda x: x.replace("US", ""))
+    except:
+        pass
+
     # reorder the columns of the DataFrame
     main_df = main_df.reindex(columns=column_order)
 
+    # Create backlog with 2 conditions
     backlog_df = main_df[main_df['delivery_status'] == '没有查到物流信息']
     backlog2 = main_df[main_df['delivery_status'].isnull()]
     backlog_df = pd.concat([backlog_df, backlog2], axis=0)
@@ -289,10 +274,54 @@ if __name__ == '__main__':
     # Good df is what's left from the main df - backlog
     good_df = main_df[~main_df['tracking'].isin(backlog_df['tracking'])]
 
-    push_to_sheets(good_df, 'Order tracking', 'test_good')
-    push_to_sheets(backlog_df, 'Order tracking', 'test_backlog')
+    push_to_sheets(good_df, 'Order tracking', 'Good Tracking')
+    push_to_sheets(backlog_df, 'Order tracking', 'Backlog')
 
     # Close the browser
     driver.close()
 
-    print('Done!')
+    print('Done!', filename)
+
+if __name__ == '__main__':
+    # Get the current folder
+    current_folder = os.getcwd()
+
+    # Get the list of XLSX files in the current folder
+    xlsx_files = [f for f in os.listdir(current_folder) if f.endswith('.xlsx')]
+
+    # Ask the user which XLSX file to use for scraping
+    print('Which XLSX file do you want to use for scraping? Type 0 for ALL files.')
+
+    print('0 ALL files\n1 Good Tracking\n2 Backlog')
+    [print(x+3, y) for x, y in enumerate(xlsx_files)]
+
+    user_choice = int(input('Enter the number of the file: '))
+
+    if user_choice == 0:
+        for file in xlsx_files:
+            main(file, 0)
+    elif user_choice == 1:
+        # Authenticate with Google Sheets API
+        gc = gspread.service_account()
+
+        # Open the specified sheet and worksheet
+        worksheet = gc.open('Order tracking').worksheet('Good Tracking')
+
+        # Get the current data from the worksheet as a dataframe
+        existing_df = pd.DataFrame(worksheet.get_all_records())
+
+        main(existing_df, 1)
+
+    elif user_choice == 2:
+        # Authenticate with Google Sheets API
+        gc = gspread.service_account()
+
+        # Open the specified sheet and worksheet
+        worksheet = gc.open('Order tracking').worksheet('Backlog')
+
+        # Get the current data from the worksheet as a dataframe
+        existing_df = pd.DataFrame(worksheet.get_all_records())
+
+        main(existing_df, 1)
+    else:
+        main(xlsx_files[user_choice-3], 0)
