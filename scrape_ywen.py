@@ -13,11 +13,50 @@ from bs4 import BeautifulSoup
 import pandas._libs.tslibs.base
 import openpyxl
 import sys
+import tkinter as tk
+from tkinter import filedialog, font
+from tkinter import messagebox
 
-def gspread_access():
-    gc = gspread.service_account(filename='service_account.json')
-    gs = gc.open('Order tracking')
-    return gs
+def last_mile(driver):
+    # we need to find last_mile value from html code
+    html = driver.page_source
+    soup = BeautifulSoup(html, 'lxml')
+
+    div_elements = soup.find_all('div', {'class': 'cx_lb'})
+
+    tracking_nr = []
+    company = []
+    has_match = False
+
+    # Loop through the div elements and find the last li element inside the ul element
+    for div in div_elements:
+        ul_element = div.find('ul')
+        if ul_element:
+            # Get all li elements inside the ul element
+            li_elements = ul_element.find_all('li')
+            # If there are any li elements, find the div with a class of cz_r inside the last li element
+            if li_elements:
+                for li in li_elements:
+                    div_cz_r = li.find('div', {'class': 'cz_r'})
+                    if div_cz_r:
+                        # Get the h6 element inside the div element
+                        h6_element = div_cz_r.find('h6')
+                        if h6_element:
+                            # Check if the h6 element contains a match for the regex expression
+                            regex = re.compile('Last mile=> (.*?), number (.*)')
+                            match = regex.search(h6_element.text)
+                            if match:
+                                company_name = match.group(1)
+                                tracking_number = match.group(2)
+                                # If there is a match, add the captured group to the company and tracking_nr list
+                                company.append(company_name)
+                                tracking_nr.append(tracking_number + 'A')
+                                has_match = True
+            # If there was no match for the regex expression, add an empty string to the last_mile list
+            if not has_match:
+                company.append('')
+                tracking_nr.append('')
+    return tracking_nr, company
 
 def error_handling(number, flag):
     # Used to split the number in the comprehension
@@ -118,15 +157,17 @@ def scrape_data_table(driver):
     # Use XPath to find the delivery status
     delivery_status = driver.find_elements_by_xpath('//div[@class="cx_xx"]')
     delivery_status = [status.text for status in delivery_status]
-    company = [error_handling(number, 3) for number in delivery_status]
+    #company = [error_handling(number, 3) for number in delivery_status]
 
     order_nr = driver.find_elements_by_xpath("//div[@class ='cx_bt_xx']")
     order_nr = [number.text for number in order_nr]
-    tracking_nr = [error_handling(number, 0) for number in order_nr] #need to add error handling as not every value has the possibility to be splitted
+    #tracking_nr = [error_handling(number, 0) for number in order_nr] #need to add error handling as not every value has the possibility to be splitted
     days_in_transport = [error_handling(number, 1) for number in order_nr] #need to add error handling as not every value has the possibility to be splitted
     days_in_transport = [error_handling(number, 2) for number in days_in_transport]
 
     order_nr = [number.split('\n')[0] for number in order_nr]
+
+    tracking_nr, company = last_mile(driver)
 
     return delivery_status, order_nr, tracking_nr, days_in_transport, company
 
@@ -139,8 +180,8 @@ def loop_through_series(df, driver):
     input_placeholder = driver.find_element_by_xpath('(//input)[1]')
 
     try: #first time we do not need to click, let's hope for an error
-        # Clear the input placeholder for safety
-        clear = driver.find_element_by_xpath("//i[@class='icon bxweb bx-guanbi clear_icon']").click()
+
+        click = driver.find_element_by_xpath("//i[@class='icon bxweb bx-guanbi clear_icon']").click()
     except:
         pass
 
@@ -173,6 +214,7 @@ def loop_through_slices(slices, driver):
     tracking_nrs = {}
     days = {}
     companies = {}
+    last_miles = {}
     # Initiate scraping
     for slice in slices:
         main_df = pd.concat([main_df, slice], axis=0)
@@ -192,21 +234,6 @@ def loop_through_slices(slices, driver):
     main_df['delivery company'] = main_df['tracking'].map(companies)
 
     return main_df
-
-def days_since(date_str: str) -> int:
-    if date_str == '':
-        return ''
-
-    # Parse the input date string and convert it to a datetime object
-    date = datetime.strptime(date_str, '%Y-%m-%d')
-
-    # Get the current date and time
-    now = datetime.now()
-
-    # Calculate the difference between the input date and the current date,
-    # expressed in days
-    diff = now - date
-    return diff.days
 
 def push_to_sheets(df, sheet_name, worksheet_name):
     # Authenticate with Google Sheets API
@@ -244,7 +271,7 @@ def main(filename, flag):
     options.add_experimental_option('excludeSwitches', ['enable-logging'])
 
     # Create a new instance of the Chrome driver
-    driver = webdriver.Chrome(options=options)
+    driver = webdriver.Chrome()
 
     # Open the specified website
     driver.get('https://track.yw56.com.cn/cn/querydel')
@@ -252,6 +279,7 @@ def main(filename, flag):
     main_df = loop_through_slices(slices, driver)
 
     if flag == 0:
+        filename = os.path.basename(filename)
         main_df['File'] = filename
 
     # Rearrange the columns
@@ -282,46 +310,118 @@ def main(filename, flag):
 
     print('Done!', filename)
 
+def welcome():
+    # create the main window
+    window = tk.Tk()
+    window.title("Scrape Ywen")
+
+    # create a text label welcoming the user
+    label = tk.Label(text="       Welcome to the Ywen scraper!")
+    label.config(font=("Courier", 18))
+    label.grid()
+
+    # create a font for the text
+    text_font = font.Font(family="Helvetica", size=12)
+
+    # create a variable to store the selected option
+    option = tk.StringVar(window, "Options")
+
+    # create a variable to store the selected files
+    files = []
+
+    # create a function to handle the file upload
+    def upload_files():
+        # open a file dialog to allow the user to select multiple files
+        files.extend(filedialog.askopenfilenames(filetypes=[("Excel files", "*.xlsx")]))
+
+        # create a table to display the selected files
+        file_table = tk.Frame(window)
+        file_table.grid(row=5, column=0, padx=10, pady=(0, 10))
+        for file in files:
+            file_label = tk.Label(file_table, text=file, font=text_font)
+            file_label.pack()
+
+    def refresh():
+        window.destroy()
+        welcome()
+
+    # create a function to run the script with the given options and files
+    def run_script(option, files):
+        print(option.get())
+        # destroy the window
+        if option.get() == 'Options' and files != []: #run through selected files
+            for file in files:
+                main(file, 0)
+            messagebox.showinfo("Finished", "The program has finished running.")
+        elif option.get() == 'All files' and files == []: #run through all files in the folder
+            # Get the current folder
+            current_folder = os.getcwd()
+
+            # Get the list of XLSX files in the current folder
+            xlsx_files = [f for f in os.listdir(current_folder) if f.endswith('.xlsx')]
+
+            for file in xlsx_files:
+                main(file, 0)
+            messagebox.showinfo("Finished", "The program has finished running.")
+        elif option.get() == 'Good Tracking' and files == []:
+            # Authenticate with Google Sheets API
+            gc = gspread.service_account()
+
+            # Open the specified sheet and worksheet
+            worksheet = gc.open('Order tracking').worksheet('Good Tracking')
+
+            # Get the current data from the worksheet as a dataframe
+            existing_df = pd.DataFrame(worksheet.get_all_records())
+
+            main(existing_df, 1)
+            messagebox.showinfo("Finished", "The program has finished running.")
+        elif option.get() == 'Backlog' and files == []:
+            # Authenticate with Google Sheets API
+            gc = gspread.service_account()
+
+            # Open the specified sheet and worksheet
+            worksheet = gc.open('Order tracking').worksheet('Backlog')
+
+            # Get the current data from the worksheet as a dataframe
+            existing_df = pd.DataFrame(worksheet.get_all_records())
+
+            main(existing_df, 1)
+            messagebox.showinfo("Finished", "The program has finished running.")
+        else:
+            # instead of printing, show a message box
+            messagebox.showerror("Error", "Please select an option OR upload a file (not both) and press RUN\n'"
+                                          "'Try refreshing the program and try again.")
+
+
+    # create a label to explain the dropdown menu
+    option_label = tk.Label(window, text="Please select an option:", font=text_font)
+    option_label.grid(row=3, column=0, padx=10, pady=(10, 0), sticky="w")
+
+    # create a dropdown menu with the options
+    option_menu = tk.OptionMenu(window, option, "All Files", "Good Tracking", "Backlog")
+    option_menu.config(font=text_font)
+    option_menu.grid(row=3, column=1, padx=10, pady=(10, 0), sticky="w")
+
+    # create a label to explain the file upload section
+    upload_label = tk.Label(window, text="Or select Excel files:", font=text_font)
+    upload_label.grid(row=4, column=0, padx=10, pady=(10, 0), sticky="w")
+
+    # create a button to allow the user to upload files
+    upload_button = tk.Button(window, text="Upload Files", font=text_font, command=upload_files)
+    upload_button.grid(row=4, column=1, padx=10, pady=(10, 0), sticky="w")
+
+    # create a button to run the script
+    run_button = tk.Button(window, text="Run", font=text_font, command=lambda: run_script(option, files))
+    run_button.grid(row=8, column=1, padx=10, pady=(10, 10), sticky="e")
+    run_button.config(bg="green", fg="white", width=10, height=1)
+
+    # create a button to run the script
+    refresh_button = tk.Button(window, text="Refresh", font=text_font, command=lambda : refresh())
+    refresh_button.grid(row=8, column=0, padx=10, pady=(10, 10), sticky="e")
+    refresh_button.config(bg="red", fg="white", width=10, height=1)
+
+    # start the main event loop
+    window.mainloop()
+
 if __name__ == '__main__':
-    # Get the current folder
-    current_folder = os.getcwd()
-
-    # Get the list of XLSX files in the current folder
-    xlsx_files = [f for f in os.listdir(current_folder) if f.endswith('.xlsx')]
-
-    # Ask the user which XLSX file to use for scraping
-    print('Which XLSX file do you want to use for scraping? Type 0 for ALL files.')
-
-    print('0 ALL files\n1 Good Tracking\n2 Backlog')
-    [print(x+3, y) for x, y in enumerate(xlsx_files)]
-
-    user_choice = int(input('Enter the number of the file: '))
-
-    if user_choice == 0:
-        for file in xlsx_files:
-            main(file, 0)
-    elif user_choice == 1:
-        # Authenticate with Google Sheets API
-        gc = gspread.service_account()
-
-        # Open the specified sheet and worksheet
-        worksheet = gc.open('Order tracking').worksheet('Good Tracking')
-
-        # Get the current data from the worksheet as a dataframe
-        existing_df = pd.DataFrame(worksheet.get_all_records())
-
-        main(existing_df, 1)
-
-    elif user_choice == 2:
-        # Authenticate with Google Sheets API
-        gc = gspread.service_account()
-
-        # Open the specified sheet and worksheet
-        worksheet = gc.open('Order tracking').worksheet('Backlog')
-
-        # Get the current data from the worksheet as a dataframe
-        existing_df = pd.DataFrame(worksheet.get_all_records())
-
-        main(existing_df, 1)
-    else:
-        main(xlsx_files[user_choice-3], 0)
+    welcome()
